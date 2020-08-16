@@ -14,7 +14,7 @@ commands:
     steps:
       - run:
           name: Escape branch name for ECS paths, etc.
-          command: echo 'export CIRCLE_BRANCH_ESCAPED=$(echo "$CIRCLE_BRANCH" | tr '/' -)' >> $BASH_ENV
+          command: echo "export CIRCLE_BRANCH_ESCAPED=$(echo "$CIRCLE_BRANCH" | tr '/' -)" >> $BASH_ENV
   parse-git-tag:
     steps:
       - run:
