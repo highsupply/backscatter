@@ -61,7 +61,9 @@ commands:
       - escape-branch
       - run:
           name: Build test image
-          command: docker build . -t $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-dev --target dev  --build-arg NPM_TOKEN=$NPM_TOKEN --build-arg GIT_SHA=$CIRCLE_SHA1 <<parameters.build_args>>
+          command: |
+            echo $BASH_ENV
+            docker build . -t $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-dev --target dev  --build-arg NPM_TOKEN=$NPM_TOKEN --build-arg GIT_SHA=$CIRCLE_SHA1 <<parameters.build_args>>
   build-canary-image:
     parameters:
       build_args:
@@ -72,7 +74,9 @@ commands:
       - escape-branch
       - run:
           name: Build canary image
-          command: docker build . -t $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-canary --target release  --build-arg NPM_TOKEN=$NPM_TOKEN --build-arg GIT_SHA=$CIRCLE_SHA1 <<parameters.build_args>>
+          command: |
+            echo $BASH_ENV
+            docker build . -t $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-canary --target release  --build-arg NPM_TOKEN=$NPM_TOKEN --build-arg GIT_SHA=$CIRCLE_SHA1 <<parameters.build_args>>
   build-release-image:
     parameters:
       build_args:
