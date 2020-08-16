@@ -1,0 +1,26 @@
+version: 2.1
+
+orbs:
+  orb-tools: circleci/orb-tools@9
+
+workflows:
+  validate-publish:
+    jobs:
+      - orb-tools/publish:
+          orb-path: src/orb.yml
+          orb-ref: "highsupply/backscatter@dev:${CIRCLE_BRANCH}"
+          publish-token-variable: "${CIRCLECI_API_TOKEN}"
+          validate: true
+          filters:
+            branches:
+              ignore:
+                - master
+      - orb-tools/increment:
+          orb-path: src/orb.yml
+          orb-ref: "highsupply/backscatter"
+          publish-token-variable: "${CIRCLECI_API_TOKEN}"
+          validate: true
+          filters:
+            branches:
+              only:
+                - master

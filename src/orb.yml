@@ -1,0 +1,398 @@
+# This code is licensed from CircleCI to the user under the MIT license. See
+# https://circleci.com/orbs/registry/licensing for details.
+version: 2.1
+description: "Orb for building, deploying Docker images."
+
+executors:
+  # TODO: Create org account on Docker Hub, add necessary tools to base image.
+  basic:
+    docker:
+      - image: highsupply/docker-alpine-node:latest
+  # TODO: Add additional executors to support more build types.
+commands:
+  escape-branch:
+    steps:
+      - run:
+          name: Escape branch name for ECS paths, etc.
+          command: echo 'export CIRCLE_BRANCH_ESCAPED=$(echo "$CIRCLE_BRANCH" | tr '/' -)' >> $BASH_ENV
+  parse-git-tag:
+    steps:
+      - run:
+          name: Parse git tag
+          working_directory: /root/project
+          command: |
+            export GIT_TAG=$(git describe --exact-match --abbrev=0 || true)
+            echo "export GIT_TAG=$GIT_TAG" >> $BASH_ENV
+  setup-github-releases:
+    steps:
+      - checkout
+      - run:
+          name: Setup Github config and SSH key
+          working_directory: /root/project
+          command: |
+            git config --global user.email "${GITHUB_RELEASE_EMAIL}"
+            git config --global user.name "${GITHUB_RELEASE_USERNAME}"
+            echo "$GITHUB_RELEASE_SSH_KEY_BASE64" | base64 -d > /root/.ssh/backscatter-releases.key
+            chmod 600 /root/.ssh/backscatter-releases.key
+            ssh-add -D
+            ssh-add  /root/.ssh/backscatter-releases.key
+  pull-image:
+    parameters:
+      image_path:
+        type: string
+    steps:
+      - run:
+          name: Pull image
+          command: docker pull <<parameters.image_path>>
+  login-ecr:
+    steps:
+      - run:
+          name: Login to ECR
+          command: $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
+  build-dev-image:
+    parameters:
+      build_args:
+        default: ""
+        type: string
+    steps:
+      - checkout
+      - escape-branch
+      - run:
+          name: Build test image
+          command: docker build -t $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-dev --target dev  --build-arg NPM_TOKEN=$NPM_TOKEN --build-arg GIT_SHA=$CIRCLE_SHA1 <<parameters.build_args>> .
+  build-canary-image:
+    parameters:
+      build_args:
+        default: ""
+        type: string
+    steps:
+      - checkout
+      - escape-branch
+      - run:
+          name: Build canary image
+          command: docker build -t $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-canary --target release  --build-arg NPM_TOKEN=$NPM_TOKEN --build-arg GIT_SHA=$CIRCLE_SHA1 <<parameters.build_args>> .
+  build-release-image:
+    parameters:
+      build_args:
+        default: ""
+        type: string
+    steps:
+      - checkout
+      - escape-branch
+      - run:
+          name: Build release image
+          command: docker build -t $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1 --target release --build-arg NPM_TOKEN=$NPM_TOKEN --build-arg GIT_SHA=$CIRCLE_SHA1 <<parameters.build_args>> .
+  yarn-cmd:
+    parameters:
+      cmd:
+        default: ""
+        type: string
+      image_path:
+        default: "dev"
+        type: string
+    steps:
+      - escape-branch
+      - pull-image: 
+          image_path: $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-<<parameters.image_path>>
+      - run:
+          name: Run command
+          command: docker run $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-<<parameters.image_path>> yarn <<parameters.cmd>>
+  yarn-install:
+    steps:
+      - run:
+          name: Install local node project
+          working_directory: /root/project
+          command: yarn install --frozen-lockfile
+  yarn-lint:
+    parameters:
+      image_path:
+        default: "dev"
+        type: string
+    steps:
+      - escape-branch
+      - pull-image:
+          image_path: $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-<<parameters.image_path>>
+      - run:
+          name: Lint
+          command: docker run $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-<<parameters.image_path>> yarn lint
+  yarn-flow:
+    parameters:
+      image_path:
+        default: "dev"
+        type: string
+    steps:
+      - escape-branch
+      - pull-image:
+          image_path: $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-<<parameters.image_path>>
+      - run:
+          name: Flow
+          command: docker run $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-<<parameters.image_path>> yarn flow
+  yarn-audit:
+    steps:
+      - checkout
+      - run:
+          name: Audit
+          command: yarn audit --frozen-lockfile || true
+  pip-install:
+    steps:
+      - run:
+          name: Install local Python reqs
+          working_directory: /root/project
+          command: pip3 install -r requirements.txt
+  tag-release:
+    parameters:
+      image_path:
+        default: $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1
+        type: string
+    steps:
+      - checkout
+      - escape-branch
+      - parse-git-tag
+      - run:
+          name: Tag sha image
+          command: docker tag <<parameters.image_path>> $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_SHA1
+      - run:
+          name: Tag branch image
+          command: docker tag <<parameters.image_path>> $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED
+      - run:
+          name: Tag branch-sha image
+          command: docker tag <<parameters.image_path>> $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1
+      - run:
+          name: Tag tagged release image
+          command: |
+            if [[ $GIT_TAG =~ ^[0-9]+(\.[0-9]+)+(-rc\.[0-9]+)?(-beta\.[0-9]+)?$ ]]; then
+              docker tag <<parameters.image_path>> $AWS_ACCOUNT_ID.$ECR/$PROJECT:$GIT_TAG
+            fi
+
+            MAJOR=$(echo "$GIT_TAG" | awk -F'.' '{print $1}')
+            MINOR=$(echo "$GIT_TAG" | awk -F'.' '{print $2}')
+            PATCH=$(echo "$GIT_TAG" | awk -F'.' '{print $3}')
+
+            if [[ $GIT_TAG =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+              docker tag <<parameters.image_path>> $AWS_ACCOUNT_ID.$ECR/$PROJECT:$MAJOR
+              docker tag <<parameters.image_path>> $AWS_ACCOUNT_ID.$ECR/$PROJECT:$MAJOR.$MINOR
+              docker tag <<parameters.image_path>> $AWS_ACCOUNT_ID.$ECR/$PROJECT:$MAJOR.$MINOR.$PATCH
+            fi
+  push-ecr:
+    parameters:
+      image_tag:
+        default: "$CIRCLE_SHA1"
+        type: string
+    steps:
+      - escape-branch
+      - run:
+          name: Push to ECR
+          command: docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:<<parameters.image_tag>>
+  push-dev-ecr:
+    steps:
+      - escape-branch
+      - run:
+          name: Push dev to ECR
+          command: docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-dev
+  push-canary-ecr:
+    steps:
+      - escape-branch
+      - run:
+          name: Push canary to ECR
+          command: docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-canary
+  push-release-ecr:
+    steps:
+      - checkout
+      - escape-branch
+      - parse-git-tag
+      - run:
+          name: Push sha image
+          command: docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_SHA1
+      - run:
+          name: Push branch image
+          command: docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1
+      - run:
+          name: Push branch-sha image
+          command: docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED
+      - run:
+          name: Push tagged release image
+          command: |
+            if [[ $GIT_TAG =~ ^[0-9]+(\.[0-9]+)+(-rc\.[0-9]+)?(-beta\.[0-9]+)?$ ]]; then
+              docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$GIT_TAG
+            fi
+
+            MAJOR=$(echo "$GIT_TAG" | awk -F'.' '{print $1}')
+            MINOR=$(echo "$GIT_TAG" | awk -F'.' '{print $2}')
+            PATCH=$(echo "$GIT_TAG" | awk -F'.' '{print $3}')
+
+            if [[ $GIT_TAG =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+              docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$MAJOR
+              docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$MAJOR.$MINOR
+              docker push $AWS_ACCOUNT_ID.$ECR/$PROJECT:$MAJOR.$MINOR.$PATCH
+            fi
+  cut-node-release:
+    parameters:
+      release_args:
+        default: "minor"
+        type: string
+    steps:
+      - checkout
+      - escape-branch
+      - parse-git-tag
+      - setup_remote_docker
+      - login-ecr
+      - run:
+          name: Determine release operation
+          working_directory: /root/project
+          command: |
+            export COMMIT_MESSAGE="$(git log -n 1 $CIRCLE_SHA1)"
+            echo "Determining major, minor, patch..."
+            echo $COMMIT_MESSAGE
+            case "$COMMIT_MESSAGE" in
+              *"[ci cut major]"* )
+                echo "cutting a major release"
+                export RELEASE_ACTION="major"
+                ;;
+              *"[ci cut minor]"* )
+                echo "cutting a minor release"
+                export RELEASE_ACTION="minor"
+                ;;
+              *"[ci cut patch]"* )
+                echo "cutting a patch release"
+                export RELEASE_ACTION="patch"
+                ;;
+              * )
+                echo "No release to cut, skipping."
+                export RELEASE_ACTION="none"
+                ;;
+            esac
+            echo "Determining beta, release candidate (rc), or release..."
+            case "$COMMIT_MESSAGE" in
+              *"[ci cut beta]"* )
+                echo "cut a beta release"
+                export PRERELEASE_ACTION="--preRelease=beta"
+                ;;
+              *"[ci cut rc]"* )
+                echo "cut a release candidate release"
+                export PRERELEASE_ACTION="--preRelease=rc"
+                ;;
+              * )
+                echo "No prerelease cut, skipping."
+                export PRERELEASE_ACTION="none"
+                ;;
+            esac
+            echo "Building release string..."
+            if [[ "$RELEASE_ACTION" = "none" ]] && [[ "$PRERELEASE_ACTION" = "none" ]]; then
+              export RELEASE_STRING="skip"
+            elif ! [[ "$RELEASE_ACTION" = "none" ]] && ! [[ "$PRERELEASE_ACTION" = "none" ]]; then
+              export RELEASE_STRING="$RELEASE_ACTION $PRERELEASE_ACTION"
+            elif ! [[ "$RELEASE_ACTION" = "none" ]] && [[ "$PRERELEASE_ACTION" = "none" ]]; then
+              export RELEASE_STRING="$RELEASE_ACTION"
+            elif [[ "$RELEASE_ACTION" = "none" ]] && ! [[ "$PRERELEASE_ACTION" = "none" ]]; then
+              export RELEASE_STRING="$PRERELEASE_ACTION"
+            fi
+            echo "Release string: $RELEASE_STRING"
+            echo "export RELEASE_STRING=\"$RELEASE_STRING\"" >> $BASH_ENV
+      - run:
+          name: Copy release files from Docker image
+          working_directory: /root/project
+          command: |
+            echo "Release string: $RELEASE_STRING"
+            if ! [[ "$RELEASE_STRING" = "skip" ]]; then
+              docker pull $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1
+              docker create -ti --name release $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1 bash
+              docker cp release:/home/node/app /root/project/release
+              docker rm -fv release
+            fi
+      - run:
+          name: Cut release and upload to Github
+          working_directory: /root/project
+          command: |
+            echo "Release string: $RELEASE_STRING"
+            if ! [[ "$RELEASE_STRING" = "skip" ]]; then
+              git config --global user.email "${GITHUB_RELEASE_EMAIL}"
+              git config --global user.name "${GITHUB_RELEASE_USERNAME}"
+              echo "$GITHUB_RELEASE_SSH_KEY_BASE64" | base64 -d > /root/.ssh/tb-releases.key
+              chmod 600 /root/.ssh/tb-releases.key
+              ssh-add -D
+              ssh-add  /root/.ssh/tb-releases.key
+              git branch -u origin/$CIRCLE_BRANCH
+              cd release && zip -r release.zip ./* && cd ..
+              release-it -n $RELEASE_STRING
+            fi
+
+jobs:
+  build-push-dev:
+    parameters:
+      build_args:
+        default: ""
+        type: string
+    executor: basic
+    steps:
+      - setup_remote_docker
+      - build-dev-image:
+          build_args: <<parameters.build_args>>
+      - login-ecr
+      - push-dev-ecr
+  build-push-canary:
+    parameters:
+      build_args:
+        default: ""
+        type: string
+    executor: basic
+    steps:
+      - setup_remote_docker
+      - build-canary-image:
+          build_args: <<parameters.build_args>>
+      - login-ecr
+      - push-canary-ecr
+  build-push-release:
+    parameters:
+      build_args:
+        default: ""
+        type: string
+    executor: basic
+    steps:
+      - setup_remote_docker
+      - build-release-image:
+          build_args: <<parameters.build_args>>
+      - tag-release
+      - login-ecr
+      - push-release-ecr
+  tag-push-release-from-canary:
+    parameters:
+      canary_image:
+        default: $AWS_ACCOUNT_ID.$ECR/$PROJECT:$CIRCLE_BRANCH_ESCAPED-$CIRCLE_SHA1-canary
+        type: string
+    executor: basic
+    steps:
+      - setup_remote_docker
+      - escape-branch
+      - login-ecr
+      - pull-image:
+          image_path: <<parameters.canary_image>>
+      - tag-release:
+          image_path: <<parameters.canary_image>>
+      - login-ecr
+      - push-release-ecr
+  yarn-lint:
+    executor: basic
+    steps:
+      - setup_remote_docker
+      - login-ecr
+      - yarn-lint
+  yarn-flow:
+    executor: basic
+    steps:
+      - setup_remote_docker
+      - login-ecr
+      - yarn-flow
+  yarn-audit:
+    executor: basic
+    steps:
+      - yarn-audit
+
+  cut-node-release:
+    executor: basic
+    parameters:
+      release_args:
+        default: "minor"
+        type: string
+    steps:
+      - cut-node-release:
+          release_args: <<parameters.release_args>>
